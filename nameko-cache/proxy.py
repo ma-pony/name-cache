@@ -3,13 +3,10 @@ import logging
 import uuid
 from functools import partial
 
-from eventlet.timeout import Timeout
-from nameko import config
 from nameko.amqp import UndeliverableMessage
-from nameko.constants import AMQP_URI_CONFIG_KEY, DEFAULT_AMQP_URI
 from nameko.exceptions import UnknownService, deserialize
-from nameko.messaging import encode_to_headers, Publisher
-from nameko.rpc import ClusterRpc, Client, RESTRICTED_PUBLISHER_OPTIONS, ReplyListener, RpcCall
+from nameko.messaging import encode_to_headers
+from nameko.rpc import Client, ClusterRpc, RpcCall
 
 _log = logging.getLogger(__name__)
 
@@ -30,16 +27,12 @@ class CacheRpcCall(RpcCall):
         super(CacheRpcCall, self).__init__(correlation_id, send_request, get_response)
 
     def send_request(self, *args, **kwargs):
-        """ Send the RPC request to the remote service
-        """
-        payload = {'args': args, 'kwargs': kwargs}
-        self.cache_hash_key = cache_hash_key(args, kwargs)
-        if self.cache.get(self.cache_hash_key):
-            return
+        """Send the RPC request to the remote service"""
+        payload = {"args": args, "kwargs": kwargs}
         self._send_request(payload)
 
     def get_response(self):
-        """ Retrieve the response for this RPC call. Blocks if the response
+        """Retrieve the response for this RPC call. Blocks if the response
         has not been received.
         """
         if self._response is not None:
@@ -49,7 +42,7 @@ class CacheRpcCall(RpcCall):
         return self._response
 
     def result(self):
-        """ Return the result of this RPC call, blocking if the response
+        """Return the result of this RPC call, blocking if the response
         has not been received.
 
         Raises a `RemoteError` if the remote service returned an error
@@ -58,15 +51,13 @@ class CacheRpcCall(RpcCall):
 
         response = self.get_response()
         self.cache[self.cache_hash_key] = response
-
-        error = response.get('error')
+        error = response.get("error")
         if error:
             raise deserialize(error)
-        return response['result']
+        return response["result"]
 
 
 class CacheClient(Client):
-
     cache_storage = {}
 
     def __getattr__(self, name):
@@ -85,7 +76,7 @@ class CacheClient(Client):
             self.register_for_reply,
             self.context_data,
             target_service,
-            target_method
+            target_method,
         )
         return clone
 
@@ -94,14 +85,13 @@ class CacheClient(Client):
             return False, None
         return True, self.cache_storage.get(key)
 
-
     def _call(self, *args: tuple, **kwargs: dict):
         if not self.fully_specified:
             raise ValueError(
                 "Cannot call unspecified method {}".format(self.identifier)
             )
 
-        _log.debug('invoking %s', self)
+        _log.debug("invoking %s", self)
 
         # We use the `mandatory` flag in `producer.publish` below to catch rpc
         # calls to non-existent services, which would otherwise wait forever
@@ -126,20 +116,29 @@ class CacheClient(Client):
 
         extra_headers = encode_to_headers(self.context_data)
 
-        cache_key = self.cache_hash_key(args, kwargs)
+        cache_key = cache_hash_key(args, kwargs)
 
         has_cache, cache_data = self.get_from_cache(cache_key)
 
+        rpc_call = CacheRpcCall(correlation_id, None, None, self.cache_storage)
+
         if has_cache:
-            return cache_data
+            get_response = lambda _: cache_data  # noqa E731
+            rpc_call._get_response = get_response
+            return rpc_call
+
         else:
+            get_response = self.register_for_reply(correlation_id)
+
             send_request = partial(
-                self.publish, routing_key=self.identifier, mandatory=True,
-                correlation_id=correlation_id, extra_headers=extra_headers
+                self.publish,
+                routing_key=self.identifier,
+                mandatory=True,
+                correlation_id=correlation_id,
+                extra_headers=extra_headers,
             )
-
-            rpc_call = CacheRpcCall(correlation_id, send_request, get_response, cache_data)
-
+            rpc_call._send_request = send_request
+            rpc_call._get_response = get_response
             try:
                 rpc_call.send_request(*args, **kwargs)
             except UndeliverableMessage:
@@ -149,41 +148,44 @@ class CacheClient(Client):
 
 
 class CacheStorage:
+    def __init__(self, cache: dict = None):
+        self.cache = cache if cache else {}
 
-    def __init__(self, cache: dict):
-        self.cache = cache
     """
     The self-defined cache storage class must implement the following methods
     """
-    def clear(self):  # real signature unknown; restored from __doc__
-        """ D.clear() -> None.  Remove all items from D. """
+
+    def clear(self):
+        """D.clear() -> None.  Remove all items from D."""
         return self.cache.clear()
 
-    def get(self, *args, **kwargs):  # real signature unknown
-        """ Return the value for key if key is in the dictionary, else default. """
+    def get(self, *args, **kwargs):
+        """Return the value for key if key is in the dictionary,
+        else default."""
         return self.cache.get(*args, **kwargs)
 
-    def pop(self, k, d=None):  # real signature unknown; restored from __doc__
+    def pop(self, k, d=None):
         """
-        D.pop(k[,d]) -> v, remove specified key and return the corresponding value.
-
+        D.pop(k[,d]) -> v, remove specified key and
+        return the corresponding value.
         If the key is not found, return the default if given; otherwise,
         raise a KeyError.
         """
         return self.cache.pop(k, d)
 
-    def __contains__(self, *args, **kwargs): # real signature unknown
-        """ True if the dictionary has the specified key, else False. """
+    def __contains__(self, *args, **kwargs):
+        """True if the dictionary has the specified key,
+        else False."""
         return self.cache.__contains__(*args, **kwargs)
 
-    def __setitem__(self, *args, **kwargs):  # real signature unknown
-        """ Set self[key] to value. """
+    def __setitem__(self, *args, **kwargs):
+        """Set self[key] to value."""
         return self.cache.__setitem__(*args, **kwargs)
 
 
-class RpcProxy(ClusterRpc):
-    """ DependencyProvider for injecting an RPC client to a specific service
-    into a service.
+class CacheRpcProxy(ClusterRpc):
+    """DependencyProvider for injecting an RPC client
+     to a specific serviceinto a service.
 
     As per :class:`~nameko.rpc.ClusterRpc` but with a pre-specified target
     service.
@@ -193,17 +195,12 @@ class RpcProxy(ClusterRpc):
             Target service name
     """
 
-    publisher_cls = Publisher
-
-    reply_listener = ReplyListener()
-
     def __init__(self, target_service, **publisher_options):
         self.target_service = target_service
         self.cache_storage: CacheStorage = publisher_options.pop("cache", dict())
-        super(RpcProxy, self).__init__(**publisher_options)
+        super(CacheRpcProxy, self).__init__(**publisher_options)
 
     def get_dependency(self, worker_ctx):
-
         publish = self.publisher.publish
         register_for_reply = self.reply_listener.register_for_reply
 
