@@ -1,5 +1,5 @@
 [tool.poetry]
-name = "nameko-cache"
+name = "nameko-cachelib"
 version = "0.1.0"
 description = ""
 authors = ["Pony Ma <mtf201013@gmail.com>"]
