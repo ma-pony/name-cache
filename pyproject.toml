@@ -1,8 +1,10 @@
 [tool.poetry]
 name = "nameko-cachelib"
-version = "0.1.0"
-description = ""
+version = "0.1.1"
+description = "An easy-to-use nameko cache"
 authors = ["Pony Ma <mtf201013@gmail.com>"]
+readme = "README.md"
+repository = "https://github.com/ma-pony/nameko-cache"
 
 [tool.poetry.dependencies]
 python = "^3.10"
